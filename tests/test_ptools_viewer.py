@@ -69,3 +69,103 @@ def test_get_viewers_shape():
     assert v["id"] == "pathway-tools"
     assert v["kind"] == "launcher"
     assert callable(v["applies"]) and callable(v["launch"]) and callable(v["targets"])
+
+
+# ---------------------------------------------------------------------------
+# deployment-config layer (vivarium-workbench #471 phase 3)
+# ---------------------------------------------------------------------------
+
+class TestUiConfigResolution:
+    """`_ui_config` resolves through the workbench's deployment-config layer.
+
+    These matter because the viewer **self-gates** on `ptools_server_url` and
+    fails *silently* -- an unconfigured launcher simply never renders. A
+    regression here is invisible until someone asks why the button is gone.
+    """
+
+    def test_deployment_config_overrides_the_workspace(self, tmp_path, monkeypatch):
+        """The whole point: a site supplies its own URL without the deployment
+        rewriting workspace.yaml."""
+        import yaml as _yaml
+        (tmp_path / "workspace.yaml").write_text(
+            _yaml.safe_dump({"ui": {"ptools_server_url": "http://localhost:1555"}}),
+            encoding="utf-8",
+        )
+        cfg = tmp_path / "deploy.yaml"
+        cfg.write_text(
+            _yaml.safe_dump({"ui": {"ptools_server_url": "http://site:8080"}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("VIVARIUM_WORKBENCH_DEPLOY_CONFIG", str(cfg))
+
+        from pbg_ptools.workbench_viewers import _ui_config
+        assert _ui_config(tmp_path)["ptools_server_url"] == "http://site:8080"
+
+    def test_no_deployment_config_uses_the_workspace(self, tmp_path, monkeypatch):
+        """Local dev: unchanged behavior, no configuration required."""
+        import yaml as _yaml
+        (tmp_path / "workspace.yaml").write_text(
+            _yaml.safe_dump({"ui": {"ptools_server_url": "http://localhost:1555"}}),
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("VIVARIUM_WORKBENCH_DEPLOY_CONFIG", raising=False)
+
+        from pbg_ptools.workbench_viewers import _ui_config
+        assert _ui_config(tmp_path)["ptools_server_url"] == "http://localhost:1555"
+
+    def test_null_unsets_a_key(self, tmp_path, monkeypatch):
+        """`ptools_data_dir: null` is what replaces the seed script's
+        imperative `ui.pop("ptools_data_dir")`, so the launcher falls back to
+        HTTP delivery where the ptools pod has no workspace mount."""
+        import yaml as _yaml
+        (tmp_path / "workspace.yaml").write_text(
+            _yaml.safe_dump({"ui": {
+                "ptools_server_url": "http://x:1555",
+                "ptools_data_dir": "/ptools-data",
+            }}),
+            encoding="utf-8",
+        )
+        cfg = tmp_path / "deploy.yaml"
+        cfg.write_text("ui:\n  ptools_data_dir: null\n", encoding="utf-8")
+        monkeypatch.setenv("VIVARIUM_WORKBENCH_DEPLOY_CONFIG", str(cfg))
+
+        from pbg_ptools.workbench_viewers import _ui_config
+        resolved = _ui_config(tmp_path)
+        assert "ptools_data_dir" not in resolved
+        assert resolved["ptools_server_url"] == "http://x:1555"
+
+    def test_viewer_still_gates_on_the_resolved_value(self, tmp_path, monkeypatch):
+        """A site can ACTIVATE the viewer for a workspace that never declared a
+        ptools server -- the launcher must appear."""
+        import yaml as _yaml
+        (tmp_path / "workspace.yaml").write_text(
+            _yaml.safe_dump({"ui": {}}), encoding="utf-8")
+        cfg = tmp_path / "deploy.yaml"
+        cfg.write_text(
+            _yaml.safe_dump({"ui": {"ptools_server_url": "http://site:8080"}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("VIVARIUM_WORKBENCH_DEPLOY_CONFIG", str(cfg))
+
+        from pbg_ptools.workbench_viewers import _ptools_configured
+        assert _ptools_configured(tmp_path) is True
+
+    def test_older_workbench_without_the_resolver_still_works(self, tmp_path, monkeypatch):
+        """The ImportError guard: this plugin is versioned independently of its
+        host, so it must not require vivarium-workbench >= 0.3.56."""
+        import builtins
+        import yaml as _yaml
+        (tmp_path / "workspace.yaml").write_text(
+            _yaml.safe_dump({"ui": {"ptools_server_url": "http://localhost:1555"}}),
+            encoding="utf-8",
+        )
+        real_import = builtins.__import__
+
+        def _no_deploy_config(name, *a, **kw):
+            if name == "vivarium_workbench.lib.deploy_config":
+                raise ImportError("simulated older workbench")
+            return real_import(name, *a, **kw)
+
+        monkeypatch.setattr(builtins, "__import__", _no_deploy_config)
+        from pbg_ptools.workbench_viewers import _ui_config
+        assert _ui_config(tmp_path)["ptools_server_url"] == "http://localhost:1555"
