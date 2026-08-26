@@ -40,7 +40,31 @@ _PTOOLS_DEFAULT_OMICS_URL_TEMPLATE = (
 
 
 def _ui_config(ws_root: Path) -> dict:
-    """The ``ui:`` block from the workspace's ``workspace.yaml`` (or {})."""
+    """The effective ``ui:`` config for a workspace.
+
+    Resolved through the workbench's deployment-config layer when available
+    (vivarium-workbench >= 0.3.56, issue #471): ``workspace.yaml``'s ``ui:``
+    block overlaid by a deployment config, so a site can supply its own
+    ``ptools_server_url`` without the deployment rewriting the workspace --
+    which is what it does today, mutating a git-tracked file at pod start and
+    leaving the workspace carrying the identity of the site it runs on.
+
+    Falls back to reading ``workspace.yaml`` directly on an older workbench.
+    That fallback is why this import is local and guarded, unlike the
+    module-level ``lib.study_spec`` / ``lib.workspace_paths`` imports above:
+    those have always existed, whereas ``lib.deploy_config`` is new, and this
+    plugin is versioned independently of its host.
+    """
+    try:
+        from vivarium_workbench.lib.deploy_config import resolve_ui_config
+    except ImportError:
+        pass
+    else:
+        try:
+            return resolve_ui_config(ws_root)
+        except Exception:  # never let config resolution break the viewer
+            return {}
+
     try:
         ws = yaml.safe_load(
             (Path(ws_root) / "workspace.yaml").read_text(encoding="utf-8")
